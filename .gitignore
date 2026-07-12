@@ -1,0 +1,12 @@
+.DS_Store
+
+# Python virtual environments
+A_study/
+.venv/
+venv/
+
+# Python caches and generated files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
