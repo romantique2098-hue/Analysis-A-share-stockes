@@ -6,13 +6,14 @@ import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RAW_DATA_DIR = PROJECT_ROOT / "data" / "raw"
+PRICE_ADJUSTMENT = "hfq"
 
 def download_daily_data(
         symbol: str,
         start_date: str,
         end_date: str,
 ) ->pd.DataFrame:
-    """下载一支A股的未复权日线行情"""
+    """下载一支A股的后复权日线行情"""
     print(f"正在下载 {symbol} 的日线行情数据...")
 
     market_symbol = (
@@ -24,7 +25,7 @@ def download_daily_data(
         symbol=market_symbol,
         start_date=start_date,
         end_date=end_date,
-        adjust="",
+        adjust=PRICE_ADJUSTMENT,
     )
 
     if raw.empty:
@@ -59,11 +60,12 @@ def download_daily_data(
         raise ValueError (f"下载的数据缺少字段 {missing_columns}, 请检查数据源是否发生变化。")
 
     data["symbol"] = symbol
+    data["adjustment"] = PRICE_ADJUSTMENT
     data["date"] = pd.to_datetime(data["date"])
 
     data = data[
         [
-        "symbol", "date", "open", "close", "high", "low", "volume", "amount"
+        "symbol", "adjustment", "date", "open", "close", "high", "low", "volume", "amount"
         ]
     ]
 

@@ -1,4 +1,5 @@
 .DS_Store
+.vscode/
 
 # Python virtual environments
 A_study/
@@ -10,3 +11,4 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .mypy_cache/
+.ruff_cache/

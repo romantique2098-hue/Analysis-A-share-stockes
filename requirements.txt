@@ -1,0 +1,4 @@
+akshare>=1.17
+matplotlib>=3.10
+pandas>=2.2
+pyarrow>=19.0

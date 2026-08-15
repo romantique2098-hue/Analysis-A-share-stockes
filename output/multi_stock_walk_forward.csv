@@ -1,0 +1,2 @@
+symbol,test_days,test_years,profitable_test_years,positive_sharpe_years,strategy_final_value,benchmark_final_value,final_value_advantage,strategy_max_drawdown,benchmark_max_drawdown,drawdown_improvement,strategy_sharpe,benchmark_sharpe,strategy_profitable,beats_benchmark,reduces_drawdown
+000001,969,4,0,0,0.8900870692105199,0.8322245270287136,0.05786254218180631,-0.21989631693264566,-0.4589813347212036,0.23908501778855795,-0.28598391837914844,-0.14513020973332869,False,True,True
