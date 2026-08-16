@@ -1,0 +1,84 @@
+market:
+  watchlist: ["000001", "600519", "000858"]
+  benchmark: "000300"
+  start_date: "2020-01-01"
+  max_stale_days: 7
+strategy:
+  name: ma_cross
+  short_window: 5
+  long_window: 20
+  ma_signal_buffer: 0.003
+  ma_confirmation_days: 2
+  breakout_window: 20
+  atr_window: 14
+  atr_stop_multiplier: 3.0
+  momentum_lookback: 60
+  momentum_skip_recent: 5
+  momentum_top_n: 2
+  momentum_rank_buffer: 2
+  momentum_short_period: 20
+  momentum_medium_period: 60
+  momentum_long_period: 120
+  rsi_window: 14
+  rsi_entry: 30.0
+  rsi_exit: 55.0
+  bollinger_window: 20
+  bollinger_std: 2.0
+  oversold_window: 5
+  oversold_return: -0.08
+  ensemble_threshold: 0.5
+  ensemble_volatility_window: 20
+portfolio:
+  initial_cash: 100000.0
+  max_position_weight: 0.20
+  lot_size: 100
+  risk_free_rate: 0.02
+  allocation_method: inverse_volatility
+  volatility_window: 60
+  target_annual_volatility: 0.15
+  cash_buffer: 0.05
+  max_portfolio_drawdown: 0.20
+  drawdown_cooldown_days: 20
+  max_positions: 20
+  min_holding_days: 3
+  minimum_rebalance_weight_change: 0.02
+  max_daily_turnover: 0.20
+costs:
+  commission_rate: 0.00025
+  minimum_commission: 5.0
+  stamp_duty_rate: 0.0005
+  slippage_bps: 5.0
+storage:
+  raw_dir: data/raw
+  adjusted_dir: data/adjusted
+  benchmark_dir: data/benchmark
+  features_dir: data/features
+  output_dir: output
+  database: state/aquant.sqlite3
+  log_dir: logs
+  universe_file: data/universe.parquet
+  factor_file: data/factors/latest.parquet
+data:
+  provider: akshare
+  timeout_seconds: 15
+  retries: 3
+  overlap_days: 15
+
+screening:
+  enabled: true
+  universe_source: all_a
+  schedule: weekly
+  schedule_weekday: 5
+  selection_count: 20
+  technical_preselect_count: 100
+  minimum_history_days: 130
+  minimum_average_amount: 20000000.0
+  exclude_st: true
+  universe_batch_size: 200
+  industry_batch_size: 200
+  max_per_industry: 4
+  momentum_weight: 0.25
+  value_weight: 0.20
+  quality_weight: 0.20
+  low_volatility_weight: 0.20
+  liquidity_weight: 0.15

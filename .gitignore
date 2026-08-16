@@ -8,5 +8,23 @@ venv/
 # Python caches and generated files
 __pycache__/
 *.py[cod]
+*.egg-info/
 .pytest_cache/
 .mypy_cache/
+.ruff_cache/
+build/
+dist/
+
+# Runtime state and generated reports
+config/settings.yaml
+state/
+logs/
+output/
+data/adjusted/
+data/benchmark/
+data/factors/
+data/universe.parquet
+data/raw/*.parquet
+data/features/*.parquet
+data/raw/*.tmp
+data/features/*.tmp

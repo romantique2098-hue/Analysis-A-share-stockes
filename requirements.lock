@@ -1,0 +1,11 @@
+# Python 3.11-3.13。由当前已验证环境冻结；升级前请先运行完整测试。
+akshare==1.18.64
+matplotlib==3.10.0
+numpy==2.1.3
+pandas==2.2.3
+pyarrow==19.0.1
+pydantic==2.10.3
+PyYAML==6.0.2
+streamlit==1.45.1
+pytest==8.3.4
+ruff==0.15.21
