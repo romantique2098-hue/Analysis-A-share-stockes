@@ -10,7 +10,14 @@ from pathlib import Path
 
 import pandas as pd
 
-from aquant.broker import execution_price, limit_target_weights, round_down_lot, transaction_fees
+from aquant.broker import (
+    execution_price,
+    is_limit_down,
+    is_limit_up,
+    limit_target_weights,
+    round_down_lot,
+    transaction_fees,
+)
 from aquant.config import AppConfig, CostConfig
 from aquant.data import MarketDataRepository
 from aquant.metrics import calculate_metrics
@@ -163,6 +170,19 @@ class BacktestEngine:
         pending_targets: dict[str, float] | None = None
         pending_force_exit = False
         last_buy_indices: dict[str, int] = {}
+        entry_prices: dict[str, float] = {}
+        # 上一交易日收盘价：用于涨跌停判断。frame 已按日期排序，
+        # shift(1) 只向后看，不引入未来数据。
+        prev_close_lookup: dict[tuple[pd.Timestamp, str], float] = {}
+        for _symbol, _frame in histories.items():
+            _prev = _frame["close"].shift(1)
+            prev_close_lookup.update(
+                {
+                    (pd.Timestamp(_ts), _symbol): float(_v)
+                    for _ts, _v in _prev.items()
+                    if pd.notna(_v)
+                }
+            )
         curve_rows: list[dict[str, object]] = []
         trades: list[dict[str, object]] = []
         peak_equity = self.config.portfolio.initial_cash
@@ -202,6 +222,11 @@ class BacktestEngine:
                         equity_open * weight / open_values[symbol],
                         self.config.portfolio.lot_size,
                     )
+                # 涨跌停校验（用户规则，字面执行）：
+                # 卖出：当日收盘 <= 跌停价则卖不出，顺延至下一交易日
+                # （保留 pending，下一交易日开盘再试；注意这是收盘口径，
+                #  比开盘时可知的信息更保守）。
+                deferred_sells: set[str] = set()
                 # 先卖后买，确保买入资金只来自已到账现金。
                 for symbol in sorted(desired):
                     current = positions.get(symbol, Position(symbol, 0, 0.0)).quantity
@@ -212,6 +237,13 @@ class BacktestEngine:
                     # 零成交量仅作为停牌/全天无成交的代理；不使用正成交量大小或
                     # 当天最高、最低价决定开盘订单能否成交。
                     if "volume" in bar and float(bar["volume"]) <= 0:
+                        continue
+                    if "close" in bar and is_limit_down(
+                        float(bar["close"]),
+                        prev_close_lookup.get((timestamp, symbol)),
+                        symbol,
+                    ):
+                        deferred_sells.add(symbol)
                         continue
                     if (
                         not pending_force_exit
@@ -228,6 +260,7 @@ class BacktestEngine:
                     if position.quantity == 0:
                         positions.pop(symbol)
                         last_buy_indices.pop(symbol, None)
+                        entry_prices.pop(symbol, None)
                     traded_notional += notional
                     trades.append(
                         {
@@ -249,6 +282,15 @@ class BacktestEngine:
                         continue
                     bar = histories[symbol].loc[timestamp]
                     if "volume" in bar and float(bar["volume"]) <= 0:
+                        continue
+                    # 买入：次日（即执行日）开盘 >= 涨停价则买不进，
+                    # 放弃本次交易（不保留 pending；对首板策略，
+                    # 策略层已预先过滤涨停开盘，故此处是安全网）。
+                    if is_limit_up(
+                        open_values[symbol],
+                        prev_close_lookup.get((timestamp, symbol)),
+                        symbol,
+                    ):
                         continue
                     price, slip_per_share = execution_price(open_values[symbol], Side.BUY, costs)
                     affordable = round_down_lot(cash / price, self.config.portfolio.lot_size)
@@ -273,6 +315,7 @@ class BacktestEngine:
                     current_position.last_buy_date = day
                     positions[symbol] = current_position
                     last_buy_indices[symbol] = day_index
+                    entry_prices[symbol] = price
                     traded_notional += notional
                     trades.append(
                         {
@@ -290,8 +333,77 @@ class BacktestEngine:
                 # 日频数据无法在开盘时知道当天完整成交量、最高价或最低价，因此只要有
                 # 有效开盘价便按开盘撮合。未完成目标会在当日收盘后基于最新信号、权益
                 # 和持仓重新生成，避免旧订单长期阻塞后续调仓。
-                pending_targets = None
-                pending_force_exit = False
+                # 唯一例外：跌停顺延的卖出保留 pending，下一交易日开盘再试。
+                if deferred_sells:
+                    pending_targets = {
+                        s: w for s, w in pending_targets.items() if s in deferred_sells
+                    }
+                    # pending_force_exit 保持原值（熔断强制退出同样顺延）
+                else:
+                    pending_targets = None
+                    pending_force_exit = False
+
+            # 盘中止盈止损（仅首板策略启用）：买入日当天不触发，
+            # 之后每个交易日用当日 high/low 判断是否触及止盈/止损线，
+            # 触及则按止盈/止损价（再扣滑点）当日了结；跌停日跳过，
+            # 留待信号翻空后的次日开盘卖出尝试（同样受跌停顺延保护）。
+            # 这是对“次日开盘执行”引擎的显式扩展，不影响其他策略。
+            if getattr(self.strategy, "enable_intraday_stops", False):
+                for symbol in sorted(list(positions.keys())):
+                    if symbol not in histories or timestamp not in histories[symbol].index:
+                        continue
+                    buy_idx = last_buy_indices.get(symbol)
+                    if buy_idx is None or day_index <= buy_idx:
+                        continue
+                    bar = histories[symbol].loc[timestamp]
+                    if "volume" in bar and float(bar["volume"]) <= 0:
+                        continue
+                    entry = entry_prices.get(symbol)
+                    if entry is None or entry <= 0:
+                        continue
+                    take_profit = getattr(self.strategy, "take_profit", 0.08)
+                    stop_loss = getattr(self.strategy, "stop_loss", 0.05)
+                    max_holding = getattr(self.strategy, "max_holding_days", 5)
+                    high = float(bar["high"]) if "high" in bar else float(bar["close"])
+                    low = float(bar["low"]) if "low" in bar else float(bar["close"])
+                    close = float(bar["close"])
+                    if is_limit_down(
+                        close, prev_close_lookup.get((timestamp, symbol)), symbol
+                    ):
+                        continue
+                    reason = None
+                    raw_price = None
+                    if high >= entry * (1 + take_profit):
+                        reason, raw_price = "take_profit", entry * (1 + take_profit)
+                    elif low <= entry * (1 - stop_loss):
+                        reason, raw_price = "stop_loss", entry * (1 - stop_loss)
+                    elif day_index - buy_idx >= max_holding:
+                        reason, raw_price = "max_holding", close
+                    if reason is None:
+                        continue
+                    position = positions[symbol]
+                    quantity = position.quantity
+                    price, slip_per_share = execution_price(raw_price, Side.SELL, costs)
+                    notional = quantity * price
+                    commission, stamp = transaction_fees(notional, Side.SELL, costs)
+                    cash += notional - commission - stamp
+                    positions.pop(symbol)
+                    last_buy_indices.pop(symbol, None)
+                    entry_prices.pop(symbol, None)
+                    traded_notional += notional
+                    trades.append(
+                        {
+                            "date": timestamp,
+                            "symbol": symbol,
+                            "side": Side.SELL.value,
+                            "quantity": quantity,
+                            "price": price,
+                            "notional": notional,
+                            "commission": commission,
+                            "stamp_duty": stamp,
+                            "slippage": slip_per_share * quantity,
+                        }
+                    )
 
             market_value = sum(
                 position.quantity * last_closes.get(symbol, position.average_cost)

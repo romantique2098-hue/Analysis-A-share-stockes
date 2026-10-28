@@ -15,6 +15,7 @@ STRATEGY_NAMES = (
     "mean_reversion",
     "ensemble_equal",
     "ensemble_risk",
+    "first_board_pullback",
 )
 BASE_COLUMNS = ["symbol", "date", "close"]
 
@@ -504,7 +505,137 @@ class EnsembleStrategy:
         ]
 
 
+class FirstBoardPullbackStrategy:
+    """首板回马枪（用户本对话给定的规则，字面实现）。
+
+    时间记号：B = 首板日（T-1），T = 买入日（B 的下一交易日）。
+    引擎是“收盘信号 -> 次日开盘执行”，因此入场信号记在 B 日，
+    引擎在 T 开盘买入，成交价就是 T 开盘价——这是开盘策略在
+    该引擎下的唯一不失真映射，代价是信号生成时必须看 T 的开盘价。
+    为防把这误读为未来函数，特此限定：入场判断只用 T 的开盘价，
+    绝不用 T 的收盘价/最高价/最低价/成交量；B 日的涨幅、是否一字板、
+    最高价均在 B 收盘时已知。退出则按常规收盘信号处理（见下），
+    另由引擎的盘中止盈止损扩展在触及当日按止盈/止损价了结。
+
+    选股（B 日）：主板涨幅 9.8%~10.2%，创业板/科创板 19.8%~20.2%，
+    且开盘价 != 收盘价（非一字板）。
+    买入（T 日）：T 开盘 > B 最高价（跳空高开确认），且
+    T 开盘涨幅（相对 B 收盘）<= 7%，且 T 开盘不涨停
+    （涨停预过滤，引擎的买入涨停校验是第二道安全网）。
+    卖出：入场价 = T 开盘价；持有期间任一交易日 high >= 入场×1.08
+    止盈，low <= 入场×0.95 止损，持有满 5 个交易日（T+5）收盘了结。
+    信号：B 日至退出日前一日为 1，退出日及之后为 0；
+    退出日信号翻空后，引擎在次日开盘的卖出尝试因已无仓位而不成交，
+    盘中止盈止损扩展已在退出日当日完成实际了结。
+    """
+
+    name = "first_board_pullback"
+    enable_intraday_stops = True
+
+    def __init__(
+        self,
+        take_profit: float = 0.08,
+        stop_loss: float = 0.05,
+        max_holding_days: int = 5,
+        max_open_rise: float = 0.07,
+    ) -> None:
+        self.take_profit = take_profit
+        self.stop_loss = stop_loss
+        self.max_holding_days = max_holding_days
+        self.max_open_rise = max_open_rise
+
+    @staticmethod
+    def _is_chinext_like(code: str) -> bool:
+        return code.startswith(("300", "688"))
+
+    def generate_signals(
+        self, history: pd.DataFrame, parameters: dict[str, object] | None = None
+    ) -> pd.DataFrame:
+        parameters = parameters or {}
+        take_profit = float(parameters.get("take_profit", self.take_profit))
+        stop_loss = float(parameters.get("stop_loss", self.stop_loss))
+        max_holding = int(parameters.get("max_holding_days", self.max_holding_days))
+        max_open_rise = float(parameters.get("max_open_rise", self.max_open_rise))
+        for col in ("open", "high", "low"):
+            if col not in history.columns:
+                raise ValueError(f"首板策略需要字段：{col}")
+        data = _prepare_history(history)
+        for col in ("open", "high", "low"):
+            data[col] = pd.to_numeric(data[col], errors="coerce")
+        data["signal"] = 0
+        data["is_board"] = False
+        data["entry_price"] = np.nan
+        data["exit_reason"] = ""
+        for _, indices in data.groupby("symbol", sort=False).groups.items():
+            idx = list(indices)
+            # 按该股交易日顺序逐日推进，不用任何未来收盘价。
+            holding = False
+            entry_price = np.nan
+            buy_idx_pos = -1  # 在 idx 列表中的位置（买入日 T）
+            for pos, index in enumerate(idx):
+                row = data.loc[index]
+                if pos == 0:
+                    continue
+                prev = data.loc[idx[pos - 1]]
+                board_ret = row["close"] / prev["close"] - 1 if prev["close"] else np.nan
+                code = str(row["symbol"])
+                lo, hi = (0.198, 0.202) if self._is_chinext_like(code) else (0.098, 0.102)
+                is_board = (
+                    pd.notna(board_ret)
+                    and lo <= board_ret <= hi
+                    and row["open"] != row["close"]
+                )
+                data.loc[index, "is_board"] = bool(is_board)
+                if holding:
+                    # 退出判断只用当日 high/low/close（当日收盘时已知），
+                    # 且只在买入日之后的交易日执行。
+                    if pos > buy_idx_pos:
+                        exit_reason = ""
+                        if row["high"] >= entry_price * (1 + take_profit):
+                            exit_reason = "take_profit"
+                        elif row["low"] <= entry_price * (1 - stop_loss):
+                            exit_reason = "stop_loss"
+                        elif pos - buy_idx_pos >= max_holding:
+                            exit_reason = "max_holding"
+                        if exit_reason:
+                            data.loc[index, "signal"] = 0
+                            data.loc[index, "exit_reason"] = exit_reason
+                            holding = False
+                            entry_price = np.nan
+                            continue
+                    data.loc[index, "signal"] = 1
+                    data.loc[index, "entry_price"] = entry_price
+                    continue
+                # 未持有：只有当日本身是首板日，且下一交易日满足开盘条件，
+                # 才在当日（B 日）记入场信号，引擎于下一交易日开盘买入。
+                if not is_board or pos + 1 >= len(idx):
+                    continue
+                nxt = data.loc[idx[pos + 1]]
+                open_rise = nxt["open"] / row["close"] - 1 if row["close"] else np.nan
+                if not (
+                    pd.notna(open_rise)
+                    and nxt["open"] > row["high"]
+                    and 0 < open_rise <= max_open_rise
+                ):
+                    continue
+                # 涨停预过滤：T 开盘涨幅达到涨停阈值则放弃本次（引擎另有安全网）。
+                thresh = 0.198 if self._is_chinext_like(code) else 0.098
+                if open_rise >= thresh:
+                    continue
+                holding = True
+                entry_price = float(nxt["open"])
+                buy_idx_pos = pos + 1
+                data.loc[index, "signal"] = 1
+                data.loc[index, "entry_price"] = entry_price
+        data["signal"] = data["signal"].astype("int8")
+        cols = [*BASE_COLUMNS, "open", "high", "low"]
+        cols += ["signal", "is_board", "entry_price", "exit_reason"]
+        return data[cols]
+
+
 def create_strategy(config: StrategyConfig) -> Strategy:
+    if config.name == "first_board_pullback":
+        return FirstBoardPullbackStrategy()
     if config.name == "ma_cross":
         return MovingAverageCrossStrategy(
             config.short_window,

@@ -44,6 +44,49 @@ def limit_target_weights(
     return targets
 
 
+def limit_threshold(symbol: str) -> float:
+    """涨跌停幅度：300/688 开头按 20%，其余按 10%。
+
+    注意：ST 股 5% 不在此建模（历史行情里无 ST 标记字段），
+    用户给的首板规则只区分主板 9.8% / 创业板 19.8%，这里与之对齐。
+    """
+    code = str(symbol).zfill(6)
+    if code.startswith(("300", "688")):
+        return 0.198
+    return 0.098
+
+
+def limit_up_price(prev_close: float, symbol: str) -> float:
+    """理论涨停价：上一收盘 × (1 + 幅度)，按 0.01 元取整到分。
+
+    幅度用 0.198/0.098 而不用 0.20/0.10，是为了与用户规则
+    “涨幅 >= 9.8% / 19.8% 即视为涨停”保持同一口径（偏保守）。
+    """
+    ratio = 1 + (0.20 if str(symbol).zfill(6).startswith(("300", "688")) else 0.10)
+    return round(float(prev_close) * ratio, 2)
+
+
+def limit_down_price(prev_close: float, symbol: str) -> float:
+    ratio = 1 - (0.20 if str(symbol).zfill(6).startswith(("300", "688")) else 0.10)
+    return round(float(prev_close) * ratio, 2)
+
+
+def is_limit_up(open_price: float, prev_close: float | None, symbol: str) -> bool:
+    if prev_close is None or prev_close <= 0:
+        return False
+    if open_price >= limit_up_price(prev_close, symbol):
+        return True
+    return open_price / prev_close - 1 >= limit_threshold(symbol)
+
+
+def is_limit_down(close_price: float, prev_close: float | None, symbol: str) -> bool:
+    if prev_close is None or prev_close <= 0:
+        return False
+    if close_price <= limit_down_price(prev_close, symbol):
+        return True
+    return close_price / prev_close - 1 <= -limit_threshold(symbol)
+
+
 def round_down_lot(quantity: float, lot_size: int) -> int:
     if quantity <= 0:
         return 0

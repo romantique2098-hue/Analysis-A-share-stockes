@@ -79,6 +79,7 @@ class StrategyConfig(BaseModel):
             "mean_reversion",
             "ensemble_equal",
             "ensemble_risk",
+            "first_board_pullback",
         }
         if value not in allowed:
             raise ValueError(f"未知策略：{value}")
